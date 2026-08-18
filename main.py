@@ -1,3 +1,4 @@
+import re
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -16,27 +17,55 @@ app.add_middleware(
 class VideoRequest(BaseModel):
     url: str
 
+def clean_url(url: str) -> str:
+    # URL માંથી ?si=... જેવા tracking parameters દૂર કરવા
+    return url.split('?si=')[0].split('&si=')[0].strip()
+
 @app.post("/download")
 def extract_video(req: VideoRequest):
+    url = clean_url(req.url)
+    
     ydl_opts = {
-        'format': 'best[ext=mp4]/best',
+        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
         'quiet': True,
         'no_warnings': True,
+        'extract_flat': False,
+        'http_headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept-Language': 'en-US,en;q=0.9',
+        },
     }
+    
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(req.url, download=False)
+            info = ydl.extract_info(url, download=False)
+            
+            # ડાયરેક્ટ વિડિયો URL મેળવવા માટે ચેક
             video_url = info.get('url')
+            if not video_url and 'formats' in info:
+                # પ્રોગ્રેસિવ (ઓડિયો + વિડિયો બંને સાથે હોય તેવું) ફોર્મેટ ફિલ્ટર
+                formats = [f for f in info['formats'] if f.get('url') and f.get('vcodec') != 'none']
+                if formats:
+                    video_url = formats[-1].get('url')
+
+            if not video_url:
+                raise Exception("Direct download link not found")
+
             title = info.get('title', 'Downloaded Video')
             thumbnail = info.get('thumbnail', '')
             duration = info.get('duration_string', '0:30')
+            extractor = info.get('extractor_key', 'Social Media')
 
             return {
+                "status": "success",
                 "success": True,
-                "title": title,
-                "download_url": video_url,
-                "thumbnail": thumbnail,
-                "duration": duration
+                "data": {
+                    "title": title,
+                    "download_url": video_url,
+                    "thumbnail": thumbnail,
+                    "duration": duration,
+                    "platform": extractor
+                }
             }
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Could not extract video: {str(e)}")
