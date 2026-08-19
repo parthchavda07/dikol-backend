@@ -1,8 +1,8 @@
 import re
 import html
-import json
 import requests
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -19,78 +19,51 @@ app.add_middleware(
 class VideoRequest(BaseModel):
     url: str
 
-def get_clean_id(raw_url: str):
-    # Regex: Instagram Shortcode ID Extract (11 digits alphanumeric)
-    match = re.search(r'(?:reel|p|reels)\/([A-Za-z0-9_-]{10,12})', raw_url)
-    if match:
-        return match.group(1)
-    return None
+def clean_url(raw: str) -> str:
+    u = raw.strip().replace(',', '').strip()
+    return u.split('?')[0].split('&')[0]
 
-def fetch_instagram_robust(raw_url: str):
-    shortcode = get_clean_id(raw_url)
-    if not shortcode:
-        # Fallback regex for loose pattern
-        m = re.search(r'(?:reel|p|reels)\/([A-Za-z0-9_-]+)', raw_url)
-        if m:
-            shortcode = m.group(1).rstrip(',').strip()
-    
-    if not shortcode:
+# --- 1. INSTAGRAM ENGINE ---
+def fetch_instagram(url: str):
+    clean = clean_url(url)
+    m = re.search(r'(?:reel|p|reels)\/([A-Za-z0-9_-]+)', clean)
+    if not m:
         return None
+    shortcode = m.group(1)
 
-    # Pipeline A: Multi-Node GraphQL & Direct App API
-    app_headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 314.0.0.19.108",
-        "Accept": "*/*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "X-IG-App-ID": "936619743392459"
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     }
 
-    # Endpoint 1: Instagram GraphQL Query
     try:
-        gql_url = f"https://www.instagram.com/graphql/query/?query_hash=b3055c01b4b222b8a47dc12b090e4e64&variables=%7B%22shortcode%22:%22{shortcode}%22%7D"
-        r = requests.get(gql_url, headers=app_headers, timeout=8)
+        embed_url = f"https://www.instagram.com/reel/{shortcode}/embed/captioned/"
+        r = requests.get(embed_url, headers=headers, timeout=8)
         if r.status_code == 200:
-            data = r.json()
-            media = data.get("data", {}).get("shortcode_media", {})
-            if media.get("is_video") and media.get("video_url"):
+            v_matches = re.findall(r'video_url\\":\\"([^"\\]+)', r.text) or re.findall(r'"video_url":"([^"]+)"', r.text)
+            if v_matches:
+                v_clean = html.unescape(v_matches[0].replace('\\u0026', '&').replace('\\/', '/'))
+                t_matches = re.findall(r'display_url\\":\\"([^"\\]+)', r.text)
+                t_clean = html.unescape(t_matches[0].replace('\\u0026', '&').replace('\\/', '/')) if t_matches else ""
                 return {
                     "title": f"Instagram Reel ({shortcode})",
-                    "download_url": media.get("video_url"),
-                    "thumbnail": media.get("display_url") or f"https://images.weserv.nl/?url=https://www.instagram.com/p/{shortcode}/media/?size=l",
+                    "download_url": v_clean,
+                    "thumbnail": t_clean or "https://via.placeholder.com/640x360?text=Instagram+Reel",
                     "platform": "Instagram"
                 }
     except Exception:
         pass
 
-    # Endpoint 2: Proxy Gateway Scraper
     try:
-        gw_url = f"https://api.vkrdownloader.com/server?vkr=https://www.instagram.com/reel/{shortcode}/"
-        r = requests.get(gw_url, timeout=8)
-        if r.status_code == 200:
-            d = r.json().get("data", {})
+        api_res = requests.get(f"https://api.vkrdownloader.com/server?vkr=https://www.instagram.com/reel/{shortcode}/", timeout=8)
+        if api_res.status_code == 200:
+            d = api_res.json().get("data", {})
             v_url = d.get("download_url") or d.get("url")
             if v_url:
                 return {
                     "title": d.get("title") or f"Instagram Reel ({shortcode})",
                     "download_url": v_url,
-                    "thumbnail": d.get("thumbnail") or f"https://images.weserv.nl/?url=https://www.instagram.com/p/{shortcode}/media/?size=l",
-                    "platform": "Instagram"
-                }
-    except Exception:
-        pass
-
-    # Endpoint 3: Fast Embed CDN Parser
-    try:
-        embed_url = f"https://www.instagram.com/reel/{shortcode}/embed/captioned/"
-        r = requests.get(embed_url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}, timeout=8)
-        if r.status_code == 200:
-            v_matches = re.findall(r'video_url\\":\\"([^"\\]+)', r.text) or re.findall(r'"video_url":"([^"]+)"', r.text)
-            if v_matches:
-                v_clean = html.unescape(v_matches[0].replace('\\u0026', '&').replace('\\/', '/'))
-                return {
-                    "title": f"Instagram Reel ({shortcode})",
-                    "download_url": v_clean,
-                    "thumbnail": f"https://images.weserv.nl/?url=https://www.instagram.com/p/{shortcode}/media/?size=l",
+                    "thumbnail": d.get("thumbnail") or "https://via.placeholder.com/640x360?text=Instagram+Reel",
                     "platform": "Instagram"
                 }
     except Exception:
@@ -98,16 +71,58 @@ def fetch_instagram_robust(raw_url: str):
 
     return None
 
-def fetch_youtube_robust(raw_url: str):
-    m = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})', raw_url)
+# --- 2. FACEBOOK ENGINE ---
+def fetch_facebook(url: str):
+    clean = url.strip().replace(',', '').strip()
+    try:
+        r = requests.get(f"https://api.vkrdownloader.com/server?vkr={clean}", timeout=8)
+        if r.status_code == 200:
+            d = r.json().get("data", {})
+            v = d.get("download_url") or d.get("url")
+            if v:
+                return {
+                    "title": d.get("title") or "Facebook Video",
+                    "download_url": v,
+                    "thumbnail": d.get("thumbnail") or "https://via.placeholder.com/640x360?text=Facebook+Video",
+                    "platform": "Facebook"
+                }
+    except Exception:
+        pass
+
+    # Method B: Direct Cobalt FB Engine
+    try:
+        c_res = requests.post(
+            "https://api.cobalt.tools", 
+            json={"url": clean, "videoQuality": "720"}, 
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            timeout=7
+        )
+        if c_res.status_code == 200:
+            d = c_res.json()
+            if d.get("url"):
+                return {
+                    "title": d.get("filename") or "Facebook Video",
+                    "download_url": d.get("url"),
+                    "thumbnail": "https://via.placeholder.com/640x360?text=Facebook+Video",
+                    "platform": "Facebook"
+                }
+    except Exception:
+        pass
+
+    return None
+
+# --- 3. YOUTUBE / SHORTS ENGINE ---
+def fetch_youtube(url: str):
+    clean = clean_url(url)
+    m = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})', clean)
     if not m:
         return None
     video_id = m.group(1)
 
     hosts = ["https://inv.tux.pizza", "https://invidious.nerdvpn.de", "https://invidious.protokolla.fi"]
-    for host in hosts:
+    for h in hosts:
         try:
-            r = requests.get(f"{host}/api/v1/videos/{video_id}", timeout=6)
+            r = requests.get(f"{h}/api/v1/videos/{video_id}", timeout=6)
             if r.status_code == 200:
                 streams = r.json().get("formatStreams", [])
                 if streams:
@@ -121,23 +136,30 @@ def fetch_youtube_robust(raw_url: str):
             continue
     return None
 
+# --- MAIN DOWNLOAD DETAILS ENDPOINT ---
 @app.post("/download")
-def download_api(req: VideoRequest):
+def download_details(req: VideoRequest):
     raw_url = req.url.strip()
 
-    # 1. Instagram
+    # Facebook
+    if "facebook.com" in raw_url or "fb.watch" in raw_url:
+        fb_data = fetch_facebook(raw_url)
+        if fb_data:
+            return {"status": "success", "data": fb_data}
+
+    # Instagram
     if "instagram.com" in raw_url:
-        data = fetch_instagram_robust(raw_url)
-        if data:
-            return {"status": "success", "data": data}
+        insta_data = fetch_instagram(raw_url)
+        if insta_data:
+            return {"status": "success", "data": insta_data}
 
-    # 2. YouTube
+    # YouTube
     if "youtube.com" in raw_url or "youtu.be" in raw_url:
-        data = fetch_youtube_robust(raw_url)
-        if data:
-            return {"status": "success", "data": data}
+        yt_data = fetch_youtube(raw_url)
+        if yt_data:
+            return {"status": "success", "data": yt_data}
 
-    # 3. TikTok & Universal Fallback
+    # TikTok & Others
     try:
         r = requests.get(f"https://api.vkrdownloader.com/server?vkr={raw_url}", timeout=8)
         if r.status_code == 200:
@@ -150,10 +172,30 @@ def download_api(req: VideoRequest):
                         "title": d.get("title") or "Social Media Video",
                         "download_url": v,
                         "thumbnail": d.get("thumbnail") or "https://via.placeholder.com/640x360?text=Video+Ready",
-                        "platform": "Universal"
+                        "platform": "Social Media"
                     }
                 }
     except Exception:
         pass
 
-    raise HTTPException(status_code=400, detail="Could not extract video. Please ensure the link is public and valid.")
+    raise HTTPException(status_code=400, detail="Could not extract video. Please make sure the post is public.")
+
+# --- PROXY STREAM (ક્યારેય કરપ્ટ ફાઈલ ન આવે તે માટે સાચો MP4 બાઈનરી ડાઉનલોડ પાથ) ---
+@app.get("/stream")
+def stream_file(video_url: str, title: str = "video"):
+    try:
+        clean_title = re.sub(r'[^a-zA-Z0-9_-]', '_', title)[:30] or "video"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+        req = requests.get(video_url, headers=headers, stream=True, timeout=15)
+        
+        return StreamingResponse(
+            req.iter_content(chunk_size=1024 * 1024),
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition": f'attachment; filename="{clean_title}.mp4"'
+            }
+        )
+    except Exception:
+        raise HTTPException(status_code=400, detail="Stream failed.")
