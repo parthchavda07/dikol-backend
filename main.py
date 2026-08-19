@@ -21,53 +21,39 @@ class VideoRequest(BaseModel):
 def clean_url(url: str) -> str:
     return url.split('?si=')[0].split('&si=')[0].strip()
 
-# YouTube અને અન્ય સોશિયલ મીડિયા માટે Cobalt API એન્જિન
-def fetch_via_cobalt(url: str):
-    endpoints = [
-        "https://api.cobalt.tools",
-        "https://cobalt-api.kwiatekm.tokyo",
-        "https://api.server.ovh/cobalt",
-        "https://cobalt.synced.team"
+# YouTube & Shorts માટે ડાયરેક્ટ CDN ફાઈલ મેળવવી
+def fetch_youtube_direct_stream(url: str):
+    vid_match = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})', url)
+    if not vid_match:
+        return None
+    
+    video_id = vid_match.group(1)
+    cdn_instances = [
+        "https://invidious.nerdvpn.de",
+        "https://inv.tux.pizza",
+        "https://invidious.protokolla.fi"
     ]
     
-    headers = {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    
-    payload = {
-        "url": url,
-        "videoQuality": "720",
-        "youtubeVideoCodec": "h264"
-    }
-    
-    for endpoint in endpoints:
+    for cdn in cdn_instances:
         try:
-            res = requests.post(endpoint, json=payload, headers=headers, timeout=8)
-            if res.status_code == 200:
-                data = res.json()
-                # Cobalt v10 response: url / tunnel
-                download_url = data.get("url")
-                if download_url:
-                    # થંબનેલ નક્કી કરવું
-                    thumbnail = "https://via.placeholder.com/640x360?text=Video+Ready"
-                    if "youtube.com" in url or "youtu.be" in url:
-                        vid_match = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})', url)
-                        if vid_match:
-                            thumbnail = f"https://img.youtube.com/vi/{vid_match.group(1)}/hqdefault.jpg"
-
-                    return {
-                        "status": "success",
-                        "success": True,
-                        "data": {
-                            "title": data.get("filename") or "Social Media Video",
-                            "download_url": download_url,
-                            "thumbnail": thumbnail,
-                            "duration": "HD",
-                            "platform": "Universal Downloader"
+            r = requests.get(f"{cdn}/api/v1/videos/{video_id}", timeout=6)
+            if r.status_code == 200:
+                data = r.json()
+                formats = data.get("formatStreams", [])
+                if formats:
+                    direct_mp4 = formats[-1].get("url")
+                    if direct_mp4:
+                        return {
+                            "status": "success",
+                            "success": True,
+                            "data": {
+                                "title": data.get("title", "YouTube Video"),
+                                "download_url": direct_mp4,
+                                "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+                                "duration": "HD",
+                                "platform": "YouTube"
+                            }
                         }
-                    }
         except Exception:
             continue
     return None
@@ -76,27 +62,28 @@ def fetch_via_cobalt(url: str):
 def extract_video(req: VideoRequest):
     url = clean_url(req.url)
     
-    # ૧. પહેલા હાઇ-સ્પીડ API વડે ચેક કરો (YouTube, TikTok, Insta, FB બધું જ હેન્ડલ કરે છે)
-    cobalt_res = fetch_via_cobalt(url)
-    if cobalt_res:
-        return cobalt_res
+    # 1. YouTube & Shorts
+    if "youtube.com" in url or "youtu.be" in url:
+        yt_data = fetch_youtube_direct_stream(url)
+        if yt_data:
+            return yt_data
 
-    # ૨. જો API બિઝી હોય તો yt-dlp ફૉલબેક
+    # 2. Instagram Reels, TikTok, Facebook
     ydl_opts = {
-        'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
+        'format': 'best[ext=mp4]/best',
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
         },
     }
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            
             video_url = info.get('url')
+            
             if not video_url and 'formats' in info:
                 formats = [f for f in info['formats'] if f.get('url') and f.get('vcodec') != 'none']
                 if formats:
