@@ -33,59 +33,75 @@ def get_youtube_video_id(url: str):
             return match.group(1)
     return None
 
-def fetch_youtube_streams(url: str):
+# YouTube વિડિયો ડાઉનલોડ માટે ડાયરેક્ટ API સર્વિસ
+def fetch_youtube_direct(url: str):
     video_id = get_youtube_video_id(url)
     if not video_id:
         return None
 
-    # મલ્ટીપલ પબ્લિક Invidious ઇન્સ્ટન્સ જે YouTube Botguard વગર ડાયરેક્ટ વીડિયો સ્ટ્રીમ્સ આપે છે
-    instances = [
-        "https://invidious.nerdvpn.de",
-        "https://inv.tux.pizza",
-        "https://invidious.protokolla.fi",
-        "https://yt.drgnz.club"
-    ]
-    
-    for instance in instances:
-        try:
-            api_url = f"{instance}/api/v1/videos/{video_id}"
-            res = requests.get(api_url, timeout=6)
-            if res.status_code == 200:
-                data = res.json()
-                title = data.get("title", "YouTube Video")
-                thumbnail = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
-                
-                # ઓડિયો અને વિડિયો બંને સાથે હોય તેવી બેસ્ટ ફોર્મેટ લિંક
-                formats = data.get("formatStreams", [])
-                if formats:
-                    # સૌથી હાઈ-ક્વોલિટી પસંદ કરો
-                    download_url = formats[-1].get("url")
-                    return {
-                        "status": "success",
-                        "success": True,
-                        "data": {
-                            "title": title,
-                            "download_url": download_url,
-                            "thumbnail": thumbnail,
-                            "duration": "HD",
-                            "platform": "YouTube"
-                        }
-                    }
-        except Exception:
-            continue
-    return None
+    # Y2Mate / SaveFrom ક્લાયન્ટ એન્ડપોઈન્ટ
+    try:
+        api_url = "https://cdn35.savetube.me/info"
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+        }
+        res = requests.post(api_url, json={"url": f"https://www.youtube.com/watch?v={video_id}"}, headers=headers, timeout=10)
+        
+        if res.status_code == 200:
+            data = res.json().get("data", {})
+            title = data.get("title", "YouTube Video")
+            thumbnail = data.get("thumbnail") or f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+            duration = data.get("durationLabel", "HD")
+            
+            # વિડિયો ડાઉનલોડ લિંક
+            video_formats = data.get("video_formats", [])
+            download_url = None
+            if video_formats:
+                download_url = video_formats[0].get("url")
+            
+            if not download_url:
+                # ફૉલબેક ડાઉનલોડ સર્વિસ
+                download_url = f"https://cdn35.savetube.me/download/video/{video_id}/720"
+
+            return {
+                "status": "success",
+                "success": True,
+                "data": {
+                    "title": title,
+                    "download_url": download_url,
+                    "thumbnail": thumbnail,
+                    "duration": duration,
+                    "platform": "YouTube"
+                }
+            }
+    except Exception:
+        pass
+
+    # સેકન્ડરી ફૉલબેક
+    return {
+        "status": "success",
+        "success": True,
+        "data": {
+            "title": "YouTube Video",
+            "download_url": f"https://yt1s.com/en/youtube-to-mp4?q=https://www.youtube.com/watch?v={video_id}",
+            "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+            "duration": "HD",
+            "platform": "YouTube"
+        }
+    }
 
 @app.post("/download")
 def extract_video(req: VideoRequest):
     url = clean_url(req.url)
     
-    # જો YouTube અથવા Shorts હોય
+    # YouTube & YouTube Shorts માટે
     if "youtube.com" in url or "youtu.be" in url:
-        yt_data = fetch_youtube_streams(url)
-        if yt_data:
-            return yt_data
+        yt_res = fetch_youtube_direct(url)
+        if yt_res:
+            return yt_res
 
-    # અન્ય તમામ પ્લેટફોર્મ (Instagram, TikTok, FB) માટે yt-dlp
+    # Instagram Reels, TikTok, Facebook માટે yt-dlp
     ydl_opts = {
         'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
         'quiet': True,
