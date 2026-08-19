@@ -21,58 +21,73 @@ class VideoRequest(BaseModel):
 def clean_url(url: str) -> str:
     return url.split('?si=')[0].split('&si=')[0].strip()
 
-# YouTube માટે Cobalt API (Render Botguard બાયપાસ કરવા માટે)
-def fetch_youtube_cobalt(url: str):
-    try:
-        api_endpoints = [
-            "https://api.cobalt.tools/api/json",
-            "https://cobalt-backend.canine.tools/api/json"
-        ]
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "url": url,
-            "vQuality": "720",
-            "isAudioOnly": False
-        }
-        for endpoint in api_endpoints:
-            try:
-                res = requests.post(endpoint, json=payload, headers=headers, timeout=10)
-                if res.status_code == 200:
-                    data = res.json()
-                    if data.get("url"):
-                        return {
-                            "status": "success",
-                            "success": True,
-                            "data": {
-                                "title": "YouTube Video",
-                                "download_url": data.get("url"),
-                                "thumbnail": "https://img.youtube.com/vi/" + (url.split('/')[-1].split('?')[0]) + "/hqdefault.jpg",
-                                "duration": "HD",
-                                "platform": "YouTube"
-                            }
+def get_youtube_video_id(url: str):
+    patterns = [
+        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
+        r'(?:embed\/|v\/|shorts\/)([0-9A-Za-z_-]{11})',
+        r'youtu\.be\/([0-9A-Za-z_-]{11})'
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+def fetch_youtube_streams(url: str):
+    video_id = get_youtube_video_id(url)
+    if not video_id:
+        return None
+
+    # મલ્ટીપલ પબ્લિક Invidious ઇન્સ્ટન્સ જે YouTube Botguard વગર ડાયરેક્ટ વીડિયો સ્ટ્રીમ્સ આપે છે
+    instances = [
+        "https://invidious.nerdvpn.de",
+        "https://inv.tux.pizza",
+        "https://invidious.protokolla.fi",
+        "https://yt.drgnz.club"
+    ]
+    
+    for instance in instances:
+        try:
+            api_url = f"{instance}/api/v1/videos/{video_id}"
+            res = requests.get(api_url, timeout=6)
+            if res.status_code == 200:
+                data = res.json()
+                title = data.get("title", "YouTube Video")
+                thumbnail = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
+                
+                # ઓડિયો અને વિડિયો બંને સાથે હોય તેવી બેસ્ટ ફોર્મેટ લિંક
+                formats = data.get("formatStreams", [])
+                if formats:
+                    # સૌથી હાઈ-ક્વોલિટી પસંદ કરો
+                    download_url = formats[-1].get("url")
+                    return {
+                        "status": "success",
+                        "success": True,
+                        "data": {
+                            "title": title,
+                            "download_url": download_url,
+                            "thumbnail": thumbnail,
+                            "duration": "HD",
+                            "platform": "YouTube"
                         }
-            except Exception:
-                continue
-    except Exception:
-        pass
+                    }
+        except Exception:
+            continue
     return None
 
 @app.post("/download")
 def extract_video(req: VideoRequest):
     url = clean_url(req.url)
     
-    # જો YouTube / Shorts હોય તો પહેલા એક્સટર્નલ એન્જિન વાપરો
+    # જો YouTube અથવા Shorts હોય
     if "youtube.com" in url or "youtu.be" in url:
-        cobalt_result = fetch_youtube_cobalt(url)
-        if cobalt_result:
-            return cobalt_result
+        yt_data = fetch_youtube_streams(url)
+        if yt_data:
+            return yt_data
 
-    # અન્ય પ્લેટફોર્મ (Instagram, TikTok, FB) માટે yt-dlp
+    # અન્ય તમામ પ્લેટફોર્મ (Instagram, TikTok, FB) માટે yt-dlp
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
@@ -94,20 +109,15 @@ def extract_video(req: VideoRequest):
             if not video_url:
                 raise Exception("Direct download link not found")
 
-            title = info.get('title', 'Social Media Video')
-            thumbnail = info.get('thumbnail', '')
-            duration = info.get('duration_string', '0:30')
-            extractor = info.get('extractor_key', 'Social Media')
-
             return {
                 "status": "success",
                 "success": True,
                 "data": {
-                    "title": title,
+                    "title": info.get('title', 'Social Media Video'),
                     "download_url": video_url,
-                    "thumbnail": thumbnail,
-                    "duration": duration,
-                    "platform": extractor
+                    "thumbnail": info.get('thumbnail', ''),
+                    "duration": info.get('duration_string', '0:30'),
+                    "platform": info.get('extractor_key', 'Social Media')
                 }
             }
     except Exception as e:
