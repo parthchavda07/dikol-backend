@@ -18,7 +18,6 @@ class VideoRequest(BaseModel):
     url: str
 
 def clean_url(url: str) -> str:
-    # URL માંથી ?si=... જેવા tracking parameters દૂર કરવા
     return url.split('?si=')[0].split('&si=')[0].strip()
 
 @app.post("/download")
@@ -30,8 +29,14 @@ def extract_video(req: VideoRequest):
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
+        # YouTube Botguard બાયપાસ કરવા માટે Android / iOS ક્લાયન્ટ
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['android', 'ios', 'web_creator']
+            }
+        },
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11; Pixel 5)',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
@@ -40,10 +45,8 @@ def extract_video(req: VideoRequest):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
-            # ડાયરેક્ટ વિડિયો URL મેળવવા માટે ચેક
             video_url = info.get('url')
             if not video_url and 'formats' in info:
-                # પ્રોગ્રેસિવ (ઓડિયો + વિડિયો બંને સાથે હોય તેવું) ફોર્મેટ ફિલ્ટર
                 formats = [f for f in info['formats'] if f.get('url') and f.get('vcodec') != 'none']
                 if formats:
                     video_url = formats[-1].get('url')
