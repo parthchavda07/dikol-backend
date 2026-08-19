@@ -19,9 +19,72 @@ class VideoRequest(BaseModel):
     url: str
 
 def clean_url(url: str) -> str:
-    return url.split('?si=')[0].split('&si=')[0].strip()
+    # URL માંથી વધારાના tracking parameters હટાવવા
+    return url.split('?')[0].strip()
 
-# YouTube & Shorts માટે ડાયરેક્ટ CDN ફાઈલ મેળવવી
+# ૧. Instagram Reels માટે 429 Rate-Limit Bypass એન્જિન
+def fetch_instagram_video(url: str):
+    clean = clean_url(url)
+    
+    # Instagram GraphQL / Public Embed Scraper
+    headers = {
+        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+        "Accept": "*/*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+    
+    # Method A: Instagram Direct JSON API
+    try:
+        json_url = f"{clean}/?__a=1&__d=dis"
+        res = requests.get(json_url, headers=headers, timeout=6)
+        if res.status_code == 200:
+            data = res.json()
+            items = data.get("items", [])
+            if items:
+                item = items[0]
+                video_versions = item.get("video_versions", [])
+                if video_versions:
+                    video_url = video_versions[0].get("url")
+                    thumb = item.get("image_versions2", {}).get("candidates", [{}])[0].get("url", "")
+                    return {
+                        "status": "success",
+                        "success": True,
+                        "data": {
+                            "title": "Instagram Reel",
+                            "download_url": video_url,
+                            "thumbnail": thumb or "https://via.placeholder.com/300x200?text=Instagram+Reel",
+                            "duration": "HD",
+                            "platform": "Instagram"
+                        }
+                    }
+    except Exception:
+        pass
+
+    # Method B: Fast Instagram Scraper API Gateway
+    try:
+        api_gateway = f"https://api.vkrdownloader.com/server?vkr={clean}"
+        res = requests.get(api_gateway, timeout=7)
+        if res.status_code == 200:
+            data = res.json().get("data", {})
+            video_url = data.get("download_url") or data.get("url")
+            if video_url:
+                return {
+                    "status": "success",
+                    "success": True,
+                    "data": {
+                        "title": data.get("title", "Instagram Reel"),
+                        "download_url": video_url,
+                        "thumbnail": data.get("thumbnail", "https://via.placeholder.com/300x200?text=Instagram+Reel"),
+                        "duration": "HD",
+                        "platform": "Instagram"
+                    }
+                }
+    except Exception:
+        pass
+
+    return None
+
+# ૨. YouTube & Shorts Resolver
 def fetch_youtube_direct_stream(url: str):
     vid_match = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})', url)
     if not vid_match:
@@ -36,7 +99,7 @@ def fetch_youtube_direct_stream(url: str):
     
     for cdn in cdn_instances:
         try:
-            r = requests.get(f"{cdn}/api/v1/videos/{video_id}", timeout=6)
+            r = requests.get(f"{cdn}/api/v1/videos/{video_id}", timeout=5)
             if r.status_code == 200:
                 data = r.json()
                 formats = data.get("formatStreams", [])
@@ -60,28 +123,34 @@ def fetch_youtube_direct_stream(url: str):
 
 @app.post("/download")
 def extract_video(req: VideoRequest):
-    url = clean_url(req.url)
-    
-    # 1. YouTube & Shorts
-    if "youtube.com" in url or "youtu.be" in url:
-        yt_data = fetch_youtube_direct_stream(url)
-        if yt_data:
-            return yt_data
+    url = req.url.strip()
 
-    # 2. Instagram Reels, TikTok, Facebook
+    # ૧. જો Instagram ની લિંક હોય
+    if "instagram.com" in url:
+        insta_res = fetch_instagram_video(url)
+        if insta_res:
+            return insta_res
+
+    # ૨. જો YouTube ની લિંક હોય
+    if "youtube.com" in url or "youtu.be" in url:
+        yt_res = fetch_youtube_direct_stream(url)
+        if yt_res:
+            return yt_res
+
+    # ૩. TikTok, Facebook અને અન્ય સાઇટ્સ માટે yt-dlp
     ydl_opts = {
         'format': 'best[ext=mp4]/best',
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
         'http_headers': {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         },
     }
     
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
+            info = ydl.extract_info(clean_url(url), download=False)
             video_url = info.get('url')
             
             if not video_url and 'formats' in info:
