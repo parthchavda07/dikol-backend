@@ -1,6 +1,5 @@
 import re
 import html
-import json
 import requests
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,58 +18,46 @@ app.add_middleware(
 class VideoRequest(BaseModel):
     url: str
 
-def clean_url_string(raw_url: str) -> str:
-    # કૉમા (,), સ્પેસ કે અન્ય બિનજરૂરી ચિહ્નો સાફ કરવા
-    u = raw_url.strip().replace(',', '').strip()
-    u = u.split('?')[0].split('&')[0]
-    return u
-
-# --- ૧. INSTAGRAM SCRAPER ENGINE ---
-def get_instagram_stream(url: str):
-    clean = clean_url_string(url)
-    match = re.search(r'(?:reel|p|reels)\/([A-Za-z0-9_-]+)', clean)
+# --- ૧. INSTAGRAM DEDICATED ENGINE ---
+def extract_instagram_reel(raw_url: str):
+    # Regex વડે છેડેથી comma, query parameters બધું જ સાફ કરીને ફક્ત Shortcode ID લેશે
+    match = re.search(r'(?:reel|p|reels)\/([A-Za-z0-9_-]+)', raw_url)
     if not match:
         return None
-    shortcode = match.group(1)
-
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 Instagram 314.0.0.19.108',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-    }
-
-    # Method 1: Direct Embed HTML Scrape
+    
+    shortcode = match.group(1).rstrip(',').strip()
+    
+    # Gateway A: InstaFix API (100% Direct MP4 CDN)
     try:
-        embed_url = f"https://www.instagram.com/reel/{shortcode}/embed/captioned/"
-        r = requests.get(embed_url, headers=headers, timeout=8)
+        r = requests.get(f"https://ddinstagram.com/api/reel/{shortcode}", headers={"User-Agent": "Mozilla/5.0"}, timeout=6)
         if r.status_code == 200:
-            html_content = r.text
-            v_matches = re.findall(r'video_url\\":\\"([^"\\]+)', html_content) or re.findall(r'"video_url":"([^"]+)"', html_content)
-            if v_matches:
-                v_clean = html.unescape(v_matches[0].replace('\\u0026', '&').replace('\\/', '/'))
-                t_matches = re.findall(r'display_url\\":\\"([^"\\]+)', html_content)
-                t_clean = html.unescape(t_matches[0].replace('\\u0026', '&').replace('\\/', '/')) if t_matches else ""
+            data = r.json()
+            if data.get("video_url") or data.get("url"):
                 return {
                     "title": f"Instagram Reel ({shortcode})",
-                    "download_url": v_clean,
-                    "thumbnail": t_clean or "https://via.placeholder.com/640x360?text=Instagram+Reel",
+                    "download_url": data.get("video_url") or data.get("url"),
+                    "thumbnail": data.get("thumbnail_url") or f"https://images.weserv.nl/?url=https://www.instagram.com/p/{shortcode}/media/?size=l",
                     "platform": "Instagram"
                 }
     except Exception:
         pass
 
-    # Method 2: Rapid SnapInsta CDN Gateway
+    # Gateway B: Direct Instagram Embed Scraper
     try:
-        api_url = f"https://api.vkrdownloader.com/server?vkr=https://www.instagram.com/reel/{shortcode}/"
-        r = requests.get(api_url, timeout=8)
-        if r.status_code == 200:
-            res_json = r.json().get("data", {})
-            v_url = res_json.get("download_url") or res_json.get("url")
-            if v_url:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        }
+        res = requests.get(f"https://www.instagram.com/reel/{shortcode}/embed/captioned/", headers=headers, timeout=8)
+        if res.status_code == 200:
+            html_text = res.text
+            v_matches = re.findall(r'video_url\\":\\"([^"\\]+)', html_text) or re.findall(r'"video_url":"([^"]+)"', html_text)
+            if v_matches:
+                v_clean = html.unescape(v_matches[0].replace('\\u0026', '&').replace('\\/', '/'))
                 return {
-                    "title": res_json.get("title") or f"Instagram Reel ({shortcode})",
-                    "download_url": v_url,
-                    "thumbnail": res_json.get("thumbnail") or "https://via.placeholder.com/640x360?text=Instagram+Reel",
+                    "title": f"Instagram Reel ({shortcode})",
+                    "download_url": v_clean,
+                    "thumbnail": f"https://images.weserv.nl/?url=https://www.instagram.com/p/{shortcode}/media/?size=l",
                     "platform": "Instagram"
                 }
     except Exception:
@@ -78,10 +65,9 @@ def get_instagram_stream(url: str):
 
     return None
 
-# --- ૨. YOUTUBE / SHORTS ENGINE ---
-def get_youtube_stream(url: str):
-    clean = clean_url_string(url)
-    vid_match = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})', clean)
+# --- ૨. YOUTUBE ENGINE ---
+def extract_youtube_video(raw_url: str):
+    vid_match = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})', raw_url)
     if not vid_match:
         return None
     video_id = vid_match.group(1)
@@ -109,11 +95,11 @@ def get_youtube_stream(url: str):
     return None
 
 # --- ૩. TIKTOK & OTHER SOCIAL MEDIA ---
-def get_universal_stream(url: str):
+def extract_universal_video(raw_url: str):
     nodes = ["https://api.cobalt.tools", "https://cobalt-api.kwiatekm.tokyo", "https://api.server.ovh/cobalt"]
     for node in nodes:
         try:
-            r = requests.post(node, json={"url": url, "videoQuality": "720"}, headers={"Accept": "application/json", "Content-Type": "application/json"}, timeout=7)
+            r = requests.post(node, json={"url": raw_url.strip().rstrip(','), "videoQuality": "720"}, headers={"Accept": "application/json", "Content-Type": "application/json"}, timeout=7)
             if r.status_code == 200:
                 d = r.json()
                 if d.get("url"):
@@ -128,24 +114,24 @@ def get_universal_stream(url: str):
     return None
 
 @app.post("/download")
-def download(req: VideoRequest):
+def download_endpoint(req: VideoRequest):
     raw_url = req.url.strip()
 
     # 1. Instagram
     if "instagram.com" in raw_url:
-        result = get_instagram_stream(raw_url)
-        if result:
-            return {"status": "success", "data": result}
+        res = extract_instagram_reel(raw_url)
+        if res:
+            return {"status": "success", "data": res}
 
-    # 2. YouTube
+    # 2. YouTube / Shorts
     if "youtube.com" in raw_url or "youtu.be" in raw_url:
-        result = get_youtube_stream(raw_url)
-        if result:
-            return {"status": "success", "data": result}
+        res = extract_youtube_video(raw_url)
+        if res:
+            return {"status": "success", "data": res}
 
-    # 3. TikTok & Others
-    result = get_universal_stream(raw_url)
-    if result:
-        return {"status": "success", "data": result}
+    # 3. TikTok / Facebook / Other
+    res = extract_universal_video(raw_url)
+    if res:
+        return {"status": "success", "data": res}
 
-    raise HTTPException(status_code=400, detail="Video extract thayo nathi. Please make sure link is public.")
+    raise HTTPException(status_code=400, detail="Could not extract video. Please ensure the link is public and valid.")
