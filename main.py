@@ -25,18 +25,18 @@ def extract_video(req: VideoRequest):
     url = clean_url(req.url)
     
     ydl_opts = {
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
         'quiet': True,
         'no_warnings': True,
         'extract_flat': False,
-        # YouTube Botguard બાયપાસ કરવા માટે Android / iOS ક્લાયન્ટ
+        # YouTube નું Botguard બાયપાસ કરવા માટે TV / Android Client
         'extractor_args': {
             'youtube': {
-                'player_client': ['android', 'ios', 'web_creator']
+                'player_client': ['tv_embedded', 'android', 'web_creator', 'ios']
             }
         },
         'http_headers': {
-            'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11; Pixel 5)',
+            'User-Agent': 'Mozilla/5.0 (SmartHub; SMART-TV; U; Linux/SmartTV; Maple2012) AppleWebKit/535.20+ (KHTML, like Gecko) SmartTV Safari/535.20+',
             'Accept-Language': 'en-US,en;q=0.9',
         },
     }
@@ -45,19 +45,27 @@ def extract_video(req: VideoRequest):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             
+            # વિડિયો URL શોધવી
             video_url = info.get('url')
             if not video_url and 'formats' in info:
-                formats = [f for f in info['formats'] if f.get('url') and f.get('vcodec') != 'none']
+                # ઓડિયો અને વિડિયો બંને હોય તેવું શ્રેષ્ઠ ફોર્મેટ પસંદ કરવું
+                formats = [
+                    f for f in info['formats'] 
+                    if f.get('url') and f.get('vcodec') != 'none' and f.get('acodec') != 'none'
+                ]
+                if not formats:
+                    formats = [f for f in info['formats'] if f.get('url') and f.get('vcodec') != 'none']
+                
                 if formats:
                     video_url = formats[-1].get('url')
 
             if not video_url:
                 raise Exception("Direct download link not found")
 
-            title = info.get('title', 'Downloaded Video')
+            title = info.get('title', 'YouTube Video')
             thumbnail = info.get('thumbnail', '')
-            duration = info.get('duration_string', '0:30')
-            extractor = info.get('extractor_key', 'Social Media')
+            duration = info.get('duration_string', '0:00')
+            extractor = info.get('extractor_key', 'YouTube')
 
             return {
                 "status": "success",
