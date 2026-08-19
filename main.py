@@ -21,86 +21,67 @@ class VideoRequest(BaseModel):
 def clean_url(url: str) -> str:
     return url.split('?si=')[0].split('&si=')[0].strip()
 
-def get_youtube_video_id(url: str):
-    patterns = [
-        r'(?:v=|\/)([0-9A-Za-z_-]{11}).*',
-        r'(?:embed\/|v\/|shorts\/)([0-9A-Za-z_-]{11})',
-        r'youtu\.be\/([0-9A-Za-z_-]{11})'
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, url)
-        if match:
-            return match.group(1)
-    return None
-
-def fetch_youtube_video(url: str):
-    video_id = get_youtube_video_id(url)
-    if not video_id:
-        return None
-
-    # Invidious CDN Instances જે ડાયરેક્ટ MP4 વીડિયો URL આપે છે
-    instances = [
-        "https://invidious.nerdvpn.de",
-        "https://inv.tux.pizza",
-        "https://yt.drgnz.club",
-        "https://invidious.protokolla.fi"
+# YouTube અને અન્ય સોશિયલ મીડિયા માટે Cobalt API એન્જિન
+def fetch_via_cobalt(url: str):
+    endpoints = [
+        "https://api.cobalt.tools",
+        "https://cobalt-api.kwiatekm.tokyo",
+        "https://api.server.ovh/cobalt",
+        "https://cobalt.synced.team"
     ]
     
-    for instance in instances:
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    
+    payload = {
+        "url": url,
+        "videoQuality": "720",
+        "youtubeVideoCodec": "h264"
+    }
+    
+    for endpoint in endpoints:
         try:
-            api_url = f"{instance}/api/v1/videos/{video_id}"
-            res = requests.get(api_url, timeout=7)
+            res = requests.post(endpoint, json=payload, headers=headers, timeout=8)
             if res.status_code == 200:
                 data = res.json()
-                title = data.get("title", "YouTube Video")
-                thumbnail = f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg"
-                
-                # ઓડિયો અને વિડિયો બંને કમ્બાઇન્ડ હોય તેવી સીધી MP4 લિંક
-                format_streams = data.get("formatStreams", [])
-                if format_streams:
-                    # 720p / 360p ની ડાયરેક્ટ MP4 URL
-                    best_stream = format_streams[-1]
-                    download_url = best_stream.get("url")
-                    
-                    if download_url:
-                        return {
-                            "status": "success",
-                            "success": True,
-                            "data": {
-                                "title": title,
-                                "download_url": download_url,
-                                "thumbnail": thumbnail,
-                                "duration": "HD",
-                                "platform": "YouTube"
-                            }
+                # Cobalt v10 response: url / tunnel
+                download_url = data.get("url")
+                if download_url:
+                    # થંબનેલ નક્કી કરવું
+                    thumbnail = "https://via.placeholder.com/640x360?text=Video+Ready"
+                    if "youtube.com" in url or "youtu.be" in url:
+                        vid_match = re.search(r'(?:v=|\/|youtu\.be\/|shorts\/)([0-9A-Za-z_-]{11})', url)
+                        if vid_match:
+                            thumbnail = f"https://img.youtube.com/vi/{vid_match.group(1)}/hqdefault.jpg"
+
+                    return {
+                        "status": "success",
+                        "success": True,
+                        "data": {
+                            "title": data.get("filename") or "Social Media Video",
+                            "download_url": download_url,
+                            "thumbnail": thumbnail,
+                            "duration": "HD",
+                            "platform": "Universal Downloader"
                         }
+                    }
         except Exception:
             continue
-
-    # Rapid Invidious Fallback (સિંગલ પ્લેયેબલ વિડિયો ડાઉનલોડ)
-    return {
-        "status": "success",
-        "success": True,
-        "data": {
-            "title": "YouTube Video",
-            "download_url": f"https://invidious.nerdvpn.de/latest_version?id={video_id}&itag=22",
-            "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
-            "duration": "720p HD",
-            "platform": "YouTube"
-        }
-    }
+    return None
 
 @app.post("/download")
 def extract_video(req: VideoRequest):
     url = clean_url(req.url)
     
-    # 1. YouTube & Shorts
-    if "youtube.com" in url or "youtu.be" in url:
-        yt_res = fetch_youtube_video(url)
-        if yt_res:
-            return yt_res
+    # ૧. પહેલા હાઇ-સ્પીડ API વડે ચેક કરો (YouTube, TikTok, Insta, FB બધું જ હેન્ડલ કરે છે)
+    cobalt_res = fetch_via_cobalt(url)
+    if cobalt_res:
+        return cobalt_res
 
-    # 2. Instagram Reels, TikTok, Facebook માટે yt-dlp
+    # ૨. જો API બિઝી હોય તો yt-dlp ફૉલબેક
     ydl_opts = {
         'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
         'quiet': True,
