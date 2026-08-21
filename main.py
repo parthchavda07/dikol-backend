@@ -1,7 +1,8 @@
 import os
 import re
 import requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -60,23 +61,34 @@ def fetch_download(req: VideoRequest):
             if res.status_code == 200:
                 data = res.json()
 
-                def extract_video_link(obj):
+                # Search strictly for MP4 / Video URLs (Reject .jpg / images)
+                def find_mp4_video(obj):
                     if isinstance(obj, dict):
+                        # Priority 1: Check explicit video fields
+                        for key in ["video_url", "video_versions", "video", "download_url"]:
+                            if key in obj:
+                                val = obj[key]
+                                if isinstance(val, str) and (".mp4" in val or "mime_type=video" in val or "mp4" in val.lower()):
+                                    if not val.endswith(".jpg") and not val.endswith(".png"):
+                                        return val
+                                elif isinstance(val, list) and len(val) > 0:
+                                    first_item = val[0]
+                                    if isinstance(first_item, dict) and "url" in first_item:
+                                        return first_item["url"]
+
                         for k, v in obj.items():
-                            if k in ["video_url", "download_url", "video", "url"] and isinstance(v, str):
-                                if "mp4" in v or "cdninstagram" in v or "fbcdn" in v:
-                                    return v
-                            found = extract_video_link(v)
+                            found = find_mp4_video(v)
                             if found:
                                 return found
+
                     elif isinstance(obj, list):
                         for item in obj:
-                            found = extract_video_link(item)
+                            found = find_mp4_video(item)
                             if found:
                                 return found
                     return None
 
-                video_url = extract_video_link(data)
+                video_url = find_mp4_video(data)
                 if video_url:
                     thumbnail_url = f"https://images.weserv.nl/?url=https://www.instagram.com/p/{shortcode}/media/?size=l" if shortcode else ""
                     break
@@ -84,7 +96,7 @@ def fetch_download(req: VideoRequest):
             continue
 
     if not video_url:
-        raise HTTPException(status_code=400, detail="Could not extract video stream.")
+        raise HTTPException(status_code=400, detail="Could not find MP4 video in this link. Please ensure it is a video reel.")
 
     return {
         "status": "success",
@@ -95,3 +107,25 @@ def fetch_download(req: VideoRequest):
             "platform": "Instagram"
         }
     }
+
+# Force Download Streamer (Forces Browser to download .mp4 file directly)
+@app.get("/stream")
+def stream_media(video_url: str = Query(...), title: str = Query("video")):
+    try:
+        clean_title = re.sub(r"[^a-zA-Z0-9_-]", "_", title)[:35] or "video"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        res = requests.get(video_url, headers=headers, stream=True, timeout=30)
+        res.raise_for_status()
+
+        return StreamingResponse(
+            res.iter_content(chunk_size=1024 * 512),
+            media_type="video/mp4",
+            headers={
+                "Content-Disposition": f'attachment; filename="{clean_title}.mp4"',
+                "Content-Type": "video/mp4"
+            }
+        )
+    except Exception:
+        raise HTTPException(status_code=400, detail="Stream failed.")
