@@ -23,7 +23,7 @@ class VideoRequest(BaseModel):
 
 
 # Put your NEW RapidAPI key in an environment variable
-RAPIDAPI_KEY = 442dc61dfamshe5d33deebd3b1f1p11e99ejsn4d6b572d3dd2
+RAPIDAPI_KEY = "442dc61dfamshe5d33deebd3b1f1p11e99ejsn4d6b572d3dd2"
 
 RAPIDAPI_HOST = "instagram-looter2.p.rapidapi.com"
 
