@@ -19,64 +19,95 @@ app.add_middleware(
 class VideoRequest(BaseModel):
     url: str
 
-# તમારી નવી Active RapidAPI Key
 RAPIDAPI_KEY = "58a2ea1d2bmsh1c20c3cbccc4cd8p18074bjsn6c96c833587c"
 RAPIDAPI_HOST = "instagram-looter2.p.rapidapi.com"
 
+def sanitize_url(raw_url: str) -> str:
+    # Remove whitespace, commas, and trailing slashes
+    clean = raw_url.strip().strip(",").strip()
+    # Strip tracking parameters (?igsh=, ?utm_source=, etc.)
+    clean = clean.split("?")[0]
+    return clean
+
 @app.post("/download")
 def fetch_download(req: VideoRequest):
-    raw_url = req.url.strip().rstrip(",")
-    if not raw_url:
-        raise HTTPException(status_code=400, detail="Invalid URL")
+    clean_url = sanitize_url(req.url)
+    if not clean_url:
+        raise HTTPException(status_code=400, detail="Invalid URL provided.")
 
-    api_url = "https://instagram-looter2.p.rapidapi.com/search"
     headers = {
         "x-rapidapi-host": RAPIDAPI_HOST,
         "x-rapidapi-key": RAPIDAPI_KEY
     }
-    params = {"query": raw_url}
 
-    try:
-        response = requests.get(api_url, headers=headers, params=params, timeout=20)
-        response.raise_for_status()
-        data = response.json()
+    # Extract shortcode (e.g. DWwXVWVCMgb)
+    shortcode_match = re.search(r'(?:reel|p|reels)\/([A-Za-z0-9_-]+)', clean_url)
+    shortcode = shortcode_match.group(1) if shortcode_match else ""
 
-        video_url = ""
-        thumbnail_url = ""
+    # Strategy 1: Post / Reel Specific Endpoint
+    api_endpoints = []
+    if shortcode:
+        api_endpoints.append({
+            "url": "https://instagram-looter2.p.rapidapi.com/post",
+            "params": {"url": f"https://www.instagram.com/reel/{shortcode}/"}
+        })
+        api_endpoints.append({
+            "url": "https://instagram-looter2.p.rapidapi.com/post",
+            "params": {"shortcode": shortcode}
+        })
 
-        if isinstance(data, dict):
-            video_url = (
-                data.get("video_url")
-                or data.get("download_url")
-                or (data.get("media") and data["media"][0].get("url"))
-                or (data.get("links") and data["links"][0].get("url"))
-            )
-            thumbnail_url = data.get("thumbnail_url") or data.get("picture") or ""
-        elif isinstance(data, list) and len(data) > 0:
-            video_url = data[0].get("video_url") or data[0].get("url")
-            thumbnail_url = data[0].get("thumbnail") or ""
+    # Strategy 2: Search Query Endpoint (Fallback)
+    api_endpoints.append({
+        "url": "https://instagram-looter2.p.rapidapi.com/search",
+        "params": {"query": clean_url}
+    })
 
-        if not video_url:
-            for k in ["url", "download", "video"]:
-                if isinstance(data, dict) and k in data:
-                    video_url = data[k]
+    video_url = ""
+    thumbnail_url = ""
+    title = f"Instagram Reel - {shortcode}" if shortcode else "Instagram Reel"
+
+    for ep in api_endpoints:
+        try:
+            res = requests.get(ep["url"], headers=headers, params=ep["params"], timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                
+                # Recursive search for video mp4 URL in nested JSON
+                def find_video_url(obj):
+                    if isinstance(obj, dict):
+                        for k, v in obj.items():
+                            if k in ["video_url", "download_url", "video", "url"] and isinstance(v, str) and ("mp4" in v or "cdninstagram" in v or "fbcdn" in v):
+                                return v
+                            res = find_video_url(v)
+                            if res:
+                                return res
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            res = find_video_url(item)
+                            if res:
+                                return res
+                    return None
+
+                found_url = find_video_url(data)
+                if found_url:
+                    video_url = found_url
+                    thumbnail_url = f"https://images.weserv.nl/?url=https://www.instagram.com/p/{shortcode}/media/?size=l" if shortcode else ""
                     break
+        except Exception:
+            continue
 
-        if not video_url:
-            raise HTTPException(status_code=400, detail="Could not extract video stream.")
+    if not video_url:
+        raise HTTPException(status_code=400, detail="Could not extract video stream. Please ensure the link is public.")
 
-        return {
-            "status": "success",
-            "data": {
-                "title": data.get("title") if isinstance(data, dict) else "Instagram Reel",
-                "download_url": video_url,
-                "thumbnail": thumbnail_url or "https://via.placeholder.com/640x360?text=Instagram+Reel",
-                "platform": "Instagram"
-            }
+    return {
+        "status": "success",
+        "data": {
+            "title": title,
+            "download_url": video_url,
+            "thumbnail": thumbnail_url or "https://via.placeholder.com/640x360?text=Instagram+Reel",
+            "platform": "Instagram"
         }
-
-    except requests.RequestException as e:
-        raise HTTPException(status_code=502, detail=f"RapidAPI request failed: {str(e)}")
+    }
 
 @app.get("/stream")
 def stream_media(video_url: str = Query(...), title: str = Query("video")):
