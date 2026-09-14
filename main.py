@@ -21,8 +21,64 @@ class VideoRequest(BaseModel):
     url: str
 
 RAPIDAPI_KEY = "58a2ea1d2bmsh1c20c3cbccc4cd8p18074bjsn6c96c833587c"
-RAPIDAPI_HOST = "instagram-looter2.p.rapidapi.com"
+INSTA_HOST = "instagram-looter2.p.rapidapi.com"
+YT_HOST = "youtube-video-fast-downloader-24-7.p.rapidapi.com"
 
+# --- ૧. YOUTUBE FAST DOWNLOADER (RAPIDAPI + SMART FALLBACK) ---
+def extract_youtube(raw_url: str):
+    pattern = r'(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([\w-]{11})'
+    match = re.search(pattern, raw_url)
+    if not match:
+        return None
+
+    video_id = match.group(1)
+    headers = {
+        "x-rapidapi-key": RAPIDAPI_KEY,
+        "x-rapidapi-host": YT_HOST
+    }
+
+    video_url = None
+    audio_url = None
+    title = f"YouTube_Video_{video_id}"
+
+    try:
+        # MP4 Video Link
+        v_res = requests.get(
+            f"https://{YT_HOST}/download_video/{video_id}",
+            headers=headers,
+            timeout=12
+        ).json()
+        if isinstance(v_res, dict):
+            video_url = v_res.get("url") or v_res.get("download_url") or v_res.get("link")
+            if v_res.get("title"):
+                title = v_res.get("title")
+
+        # MP3 Audio Link
+        a_res = requests.get(
+            f"https://{YT_HOST}/download_audio/{video_id}",
+            headers=headers,
+            timeout=12
+        ).json()
+        if isinstance(a_res, dict):
+            audio_url = a_res.get("url") or a_res.get("download_url") or a_res.get("link")
+    except Exception:
+        pass
+
+    # Reliable fallback if API limits or fails
+    if not video_url:
+        video_url = f"https://loader.to/api/button/?url=https://www.youtube.com/watch?v={video_id}&f=1080"
+    if not audio_url:
+        audio_url = f"https://loader.to/api/button/?url=https://www.youtube.com/watch?v={video_id}&f=mp3"
+
+    return {
+        "title": title,
+        "download_url": video_url,
+        "audio_url": audio_url,
+        "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+        "platform": "YouTube"
+    }
+
+# --- ૨. UNIVERSAL FALLBACK (YT-DLP FOR TIKTOK/FACEBOOK) ---
 def extract_via_ytdlp(url: str):
     ydl_opts = {
         'format': 'best[ext=mp4]/best',
@@ -39,20 +95,17 @@ def extract_via_ytdlp(url: str):
         info = ydl.extract_info(url, download=False)
         video_url = info.get('url')
         if not video_url and 'formats' in info:
-            # Get highest quality mp4 format with video+audio
             formats = [f for f in info['formats'] if f.get('ext') == 'mp4' and f.get('vcodec') != 'none']
-            if formats:
-                video_url = formats[-1].get('url')
-            else:
-                video_url = info['formats'][-1].get('url')
+            video_url = formats[-1].get('url') if formats else info['formats'][-1].get('url')
 
         return {
             "title": info.get('title') or "video",
             "download_url": video_url,
-            "thumbnail": info.get('thumbnail') or "https://via.placeholder.com/640x360?text=Video+Ready",
+            "thumbnail": info.get('thumbnail') or "https://images.placeholders.dev/?width=640&height=360&text=Video+Ready",
             "platform": info.get('extractor_key') or "Social Media"
         }
 
+# --- ૩. MAIN DOWNLOAD ROUTE ---
 @app.post("/download")
 def fetch_download(req: VideoRequest):
     raw_url = req.url.strip()
@@ -60,38 +113,35 @@ def fetch_download(req: VideoRequest):
         raise HTTPException(status_code=400, detail="Invalid URL provided.")
 
     is_instagram = "instagram.com" in raw_url or "instagr.am" in raw_url
-    is_tiktok = "tiktok.com" in raw_url
     is_youtube = "youtube.com" in raw_url or "youtu.be" in raw_url
+    is_tiktok = "tiktok.com" in raw_url
     is_facebook = "facebook.com" in raw_url or "fb.watch" in raw_url
 
-    # Method 1: If TikTok, YouTube, Facebook, or Twitter -> Use yt-dlp Directly
-    if is_tiktok or is_youtube or is_facebook:
-        try:
-            data = extract_via_ytdlp(raw_url)
-            if data.get("download_url"):
-                return {"status": "success", "data": data}
-        except Exception as e:
-            pass
+    # A. YOUTUBE HANDLER
+    if is_youtube:
+        yt_data = extract_youtube(raw_url)
+        if yt_data:
+            return {"status": "success", "data": yt_data}
 
-    # Method 2: If Instagram -> Try RapidAPI First, then Fallback to yt-dlp
+    # B. INSTAGRAM HANDLER (WITH REAL THUMBNAIL EXTRACTION)
     if is_instagram:
         clean_url = raw_url.split("?")[0]
         shortcode_match = re.search(r'(?:reel|p|reels)\/([A-Za-z0-9_-]+)', clean_url)
         shortcode = shortcode_match.group(1) if shortcode_match else ""
 
         headers = {
-            "x-rapidapi-host": RAPIDAPI_HOST,
+            "x-rapidapi-host": INSTA_HOST,
             "x-rapidapi-key": RAPIDAPI_KEY
         }
 
         api_endpoints = []
         if shortcode:
             api_endpoints.append({
-                "url": "https://instagram-looter2.p.rapidapi.com/post",
+                "url": f"https://{INSTA_HOST}/post",
                 "params": {"url": f"https://www.instagram.com/reel/{shortcode}/"}
             })
         api_endpoints.append({
-            "url": "https://instagram-looter2.p.rapidapi.com/search",
+            "url": f"https://{INSTA_HOST}/search",
             "params": {"query": clean_url}
         })
 
@@ -101,6 +151,7 @@ def fetch_download(req: VideoRequest):
                 if res.status_code == 200:
                     data = res.json()
 
+                    # Find Real MP4
                     def find_mp4_video(obj):
                         if isinstance(obj, dict):
                             for key in ["video_url", "video_versions", "video", "download_url"]:
@@ -113,33 +164,64 @@ def fetch_download(req: VideoRequest):
                                         first_item = val[0]
                                         if isinstance(first_item, dict) and "url" in first_item:
                                             return first_item["url"]
-                            for k, v in obj.items():
+                            for _, v in obj.items():
                                 found = find_mp4_video(v)
-                                if found:
-                                    return found
+                                if found: return found
                         elif isinstance(obj, list):
                             for item in obj:
                                 found = find_mp4_video(item)
-                                if found:
-                                    return found
+                                if found: return found
+                        return None
+
+                    # Find Real Thumbnail Image
+                    def find_real_thumb(obj):
+                        if isinstance(obj, dict):
+                            for k in ["thumbnail_url", "display_url", "cover", "picture", "image_versions2"]:
+                                if k in obj:
+                                    v = obj[k]
+                                    if isinstance(v, str) and "http" in v: return v
+                                    if isinstance(v, dict) and "candidates" in v and len(v["candidates"]) > 0:
+                                        return v["candidates"][0].get("url")
+                            for _, v in obj.items():
+                                t = find_real_thumb(v)
+                                if t: return t
+                        elif isinstance(obj, list):
+                            for item in obj:
+                                t = find_real_thumb(item)
+                                if t: return t
                         return None
 
                     video_url = find_mp4_video(data)
+                    raw_thumb = find_real_thumb(data)
+
+                    if raw_thumb:
+                        safe_thumb = f"https://wsrv.nl/?url={requests.utils.quote(raw_thumb)}"
+                    else:
+                        safe_thumb = "https://images.placeholders.dev/?width=640&height=360&text=Instagram+Reel"
+
                     if video_url:
-                        thumbnail_url = f"https://images.weserv.nl/?url=https://www.instagram.com/p/{shortcode}/media/?size=l" if shortcode else ""
                         return {
                             "status": "success",
                             "data": {
                                 "title": f"Instagram_Reel_{shortcode}" if shortcode else "Instagram_Video",
                                 "download_url": video_url,
-                                "thumbnail": thumbnail_url or "https://via.placeholder.com/640x360?text=Instagram+Reel",
+                                "thumbnail": safe_thumb,
                                 "platform": "Instagram"
                             }
                         }
             except Exception:
                 continue
 
-    # Final Universal Fallback for any link
+    # C. TIKTOK / FACEBOOK / OTHER HANDLER
+    if is_tiktok or is_facebook:
+        try:
+            data = extract_via_ytdlp(raw_url)
+            if data.get("download_url"):
+                return {"status": "success", "data": data}
+        except Exception:
+            pass
+
+    # D. FINAL UNIVERSAL FALLBACK
     try:
         data = extract_via_ytdlp(raw_url)
         if data.get("download_url"):
@@ -149,7 +231,7 @@ def fetch_download(req: VideoRequest):
 
     raise HTTPException(status_code=400, detail="Could not extract video. Please make sure the link is public.")
 
-# Streamer (Forces Direct Browser File Download)
+# --- ૪. STREAMING PROXY ROUTE ---
 @app.get("/stream")
 def stream_media(video_url: str = Query(...), title: str = Query("video")):
     try:
