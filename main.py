@@ -24,7 +24,7 @@ RAPIDAPI_KEY = "58a2ea1d2bmsh1c20c3cbccc4cd8p18074bjsn6c96c833587c"
 INSTA_HOST = "instagram-looter2.p.rapidapi.com"
 YT_HOST = "youtube-video-fast-downloader-24-7.p.rapidapi.com"
 
-# --- ૧. YOUTUBE FAST DOWNLOADER (RAPIDAPI + SMART FALLBACK) ---
+# --- ૧. YOUTUBE FAST DOWNLOADER (DIRECT CDN STREAM) ---
 def extract_youtube(raw_url: str):
     pattern = r'(?:youtu\.be\/|youtube\.com\/(?:embed\/|v\/|watch\?v=|watch\?.+&v=|shorts\/))([\w-]{11})'
     match = re.search(pattern, raw_url)
@@ -42,41 +42,49 @@ def extract_youtube(raw_url: str):
     title = f"YouTube_Video_{video_id}"
 
     try:
-        # MP4 Video Link
+        # ૧. MP4 Video Link
         v_res = requests.get(
             f"https://{YT_HOST}/download_video/{video_id}",
             headers=headers,
-            timeout=12
+            params={"quality": "720"},
+            timeout=15
         ).json()
         if isinstance(v_res, dict):
-            video_url = v_res.get("url") or v_res.get("download_url") or v_res.get("link")
+            video_url = v_res.get("download_url") or v_res.get("url") or v_res.get("link")
             if v_res.get("title"):
                 title = v_res.get("title")
 
-        # MP3 Audio Link
+        # ૨. MP3 Audio Link
         a_res = requests.get(
             f"https://{YT_HOST}/download_audio/{video_id}",
             headers=headers,
-            timeout=12
+            params={"quality": "251"},
+            timeout=15
         ).json()
         if isinstance(a_res, dict):
-            audio_url = a_res.get("url") or a_res.get("download_url") or a_res.get("link")
+            audio_url = a_res.get("download_url") or a_res.get("url") or a_res.get("link")
     except Exception:
         pass
 
-    # Reliable fallback if API limits or fails
+    # જો RapidAPI માંથી લિંક ન મળે તો yt-dlp ડાયરેક્ટ ટ્રાય કરશે (લીલું પેજ નહીં ખુલે)
     if not video_url:
-        video_url = f"https://loader.to/api/button/?url=https://www.youtube.com/watch?v={video_id}&f=1080"
-    if not audio_url:
-        audio_url = f"https://loader.to/api/button/?url=https://www.youtube.com/watch?v={video_id}&f=mp3"
+        try:
+            fallback_data = extract_via_ytdlp(raw_url)
+            if fallback_data.get("download_url"):
+                return fallback_data
+        except Exception:
+            pass
 
-    return {
-        "title": title,
-        "download_url": video_url,
-        "audio_url": audio_url,
-        "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
-        "platform": "YouTube"
-    }
+    if video_url:
+        return {
+            "title": title,
+            "download_url": video_url,
+            "audio_url": audio_url or video_url,
+            "thumbnail": f"https://img.youtube.com/vi/{video_id}/hqdefault.jpg",
+            "platform": "YouTube"
+        }
+
+    return None
 
 # --- ૨. UNIVERSAL FALLBACK (YT-DLP FOR TIKTOK/FACEBOOK) ---
 def extract_via_ytdlp(url: str):
@@ -123,7 +131,7 @@ def fetch_download(req: VideoRequest):
         if yt_data:
             return {"status": "success", "data": yt_data}
 
-    # B. INSTAGRAM HANDLER (WITH REAL THUMBNAIL EXTRACTION)
+    # B. INSTAGRAM HANDLER
     if is_instagram:
         clean_url = raw_url.split("?")[0]
         shortcode_match = re.search(r'(?:reel|p|reels)\/([A-Za-z0-9_-]+)', clean_url)
@@ -151,7 +159,6 @@ def fetch_download(req: VideoRequest):
                 if res.status_code == 200:
                     data = res.json()
 
-                    # Find Real MP4
                     def find_mp4_video(obj):
                         if isinstance(obj, dict):
                             for key in ["video_url", "video_versions", "video", "download_url"]:
@@ -173,7 +180,6 @@ def fetch_download(req: VideoRequest):
                                 if found: return found
                         return None
 
-                    # Find Real Thumbnail Image
                     def find_real_thumb(obj):
                         if isinstance(obj, dict):
                             for k in ["thumbnail_url", "display_url", "cover", "picture", "image_versions2"]:
@@ -212,7 +218,7 @@ def fetch_download(req: VideoRequest):
             except Exception:
                 continue
 
-    # C. TIKTOK / FACEBOOK / OTHER HANDLER
+    # C. TIKTOK / FACEBOOK HANDLER
     if is_tiktok or is_facebook:
         try:
             data = extract_via_ytdlp(raw_url)
@@ -221,7 +227,7 @@ def fetch_download(req: VideoRequest):
         except Exception:
             pass
 
-    # D. FINAL UNIVERSAL FALLBACK
+    # D. FINAL FALLBACK
     try:
         data = extract_via_ytdlp(raw_url)
         if data.get("download_url"):
